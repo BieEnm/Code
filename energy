@@ -1,0 +1,589 @@
+#include "Operate_Keypad.h"
+//#include "Operate_Encoder.h"
+#define Meter_ADDR  125
+#define Total_of_Reg  3
+
+#define Reg_VoltPhaseA  4039
+#define Reg_PowerTotal  4015  //0.001kW
+#define Reg_ActiveEnergyTotal 4011  //0.1kWh
+
+uint16_t const Reg_addr[3] = {
+  Reg_VoltPhaseA,
+  Reg_PowerTotal,
+  Reg_ActiveEnergyTotal
+};
+
+float DATA_METER [Total_of_Reg];
+ModbusMaster node;
+int Meter_Uint = 0;
+
+uint32_t  Read_Meter(char addr, uint16_t  REG) {
+  uint8_t j, result;
+  uint32_t  data[1];
+  uint32_t value = 0;
+
+  node.begin ( addr, Serial2 );
+
+  result = node.readHoldingRegisters(REG, 1);
+  delay(100);
+  if (result == node.ku8MBSuccess) {
+    for (j = 0; j < 1; j++) {
+      data[j] = node.getResponseBuffer(j);
+    }
+    Meter_Uint = 1;
+    value = data[0];
+    return value;
+  } else {
+    Meter_Uint = 0;
+    Serial.print("Connec modbus fail. REG>>> ");
+    Serial.println(REG, HEX);
+    return 0;
+  }
+}
+
+int Process_Value;
+int GoogleID_Report;
+String Machine;
+String Sent_Machine, Sent_Size, Sent_Unit, Sent_kWh, Sent_Speed, Sent_Energy;
+float Cal_Weight, Data_Weight, Data_Unit;
+
+//===============WiFi================
+String GOOGLE_SCRIPT_ID;
+#include <HTTPClient.h>
+
+#include <WiFi.h>
+//const char* ssid = "ESPcenter";
+//const char* password = "esp-3214";
+int wifi_count;
+const char* ssid = "BiE";
+const char* password = "bie97282307";
+void WiFiStationConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+  digitalWrite(LED_BUILTIN, LOW);
+  Serial.println("Connected to AP successfully!");
+}
+
+void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void WiFiStationDisconnected(WiFiEvent_t event, WiFiEventInfo_t info) {
+  digitalWrite(LED_BUILTIN, HIGH);
+  Serial.print("WiFi lost connection. Reason: ");
+  Serial.println(info.wifi_sta_disconnected.reason);
+  Serial.println("Trying to Reconnect");
+  WiFi.mode(WIFI_MODE_STA);
+  WiFi.enableSTA(true);
+  WiFi.begin(ssid, password);
+}
+
+//===============WiFi================
+
+//==============KeyPad===============
+#include <Keypad_I2C.h>
+#include <Keypad.h>
+#include <Wire.h>
+#define I2CADDR 0x24
+const byte ROWS = 4;
+const byte COLS = 4;
+char keys[ROWS][COLS] = {
+  { '1', '2', '3', 'A' },
+  { '4', '5', '6', 'B' },
+  { '7', '8', '9', 'C' },
+  { '.', '0', '#', 'D' }
+};
+byte rowPins[ROWS] = { 0, 1, 2, 3 };
+byte colPins[COLS] = { 4, 5, 6, 7 };
+Keypad_I2C keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS, I2CADDR, PCF8574);
+
+//variable
+char OD[10], TN[10], MC[10];
+int Count_key;
+int Key_A = 1;
+int Del, Clear_cursor, Set_cursor;
+int Key_D = 1;
+String Dimention_Value;
+int Lcd_clear;
+int Set_display;
+//==============KeyPad===============
+
+//===============Time================
+int sec, sec_cursor;
+String sec_str;
+unsigned long previousMillis = 0;
+//===============Time================
+
+//==============Encoder==============
+#include <ESP32Encoder.h>
+ESP32Encoder encoder;
+
+//variable
+String Encoder_str;
+float Encoder_float;
+float Long_Encoder;
+//==============Encoder==============
+
+//================LCD================
+#include <LiquidCrystal_I2C.h>
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+//variable
+byte image07[8] = { B00011, B00011, B00011, B00011, B00011, B00011, B00011, B00011 };  //cursor
+String Char_str[30];
+//================LCD================
+
+//===============Modbus==============
+#include <ModbusMaster.h>
+#include "Uint_32.h"
+#define RXD2 16
+#define TXD2 17
+float Data_Volt;
+float Data_kWh;
+float Data_TotalEnergy;
+int Meter_Run = 1;
+String kWh_Str;
+int Count_Meter;
+int Frist_Process;
+//===============Modbus==============
+
+
+void setup() {
+  Serial.begin(115200);
+  //setCpuFrequencyMhz(120);
+  //delay(1000);
+  Serial.print("CPU Freq: ");
+  Serial.println(getCpuFrequencyMhz());
+
+  //===============WiFi================
+  pinMode(LED_BUILTIN, OUTPUT);
+  WiFi.disconnect(true);
+  WiFi.onEvent(WiFiStationConnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_CONNECTED);
+  WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
+  WiFi.onEvent(WiFiStationDisconnected, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+  WiFi.mode(WIFI_MODE_STA);
+  WiFi.enableSTA(true);
+  WiFi.begin(ssid, password);
+  //===============WiFi================
+
+  //==============Encoder==============
+  ESP32Encoder::useInternalWeakPullResistors = UP;
+  encoder.attachHalfQuad(25, 26);
+  encoder.clearCount();
+
+  //==============Encoder==============
+
+  //==============KeyPad===============
+  Wire.begin();
+  keypad.begin(makeKeymap(keys));
+  //==============KeyPad===============
+
+  //==============Modbus===============
+  Serial2.begin(4800, SERIAL_8E1, RXD2, TXD2);
+  //==============Modbus===============
+
+  //================LCD================
+  lcd.init();
+  lcd.backlight();
+  lcd.createChar(0, image07);
+  Char_str[0] = "      Fill out";
+  Char_str[1] = "  OD : ";
+  //Char_str[2] is OD Value
+  Char_str[3] = "  TN : ";
+  //Char_str[4] is Thickness Value
+  Char_str[5] = " AEI : ";
+  //Char_str[6] is Machine
+  Char_str[7] = "        DATA";
+  Char_str[8] = "Size  : ";
+  //Char_str[9] is OD x Thickness
+  Char_str[10] = "Power : ";
+  //Char_str[11] is Power Value
+  Char_str[12] = "Value : ";
+  //Char_str[13] is Unit Value
+  Char_str[14] = "        DATA";
+  Char_str[15] = "Speed  : ";
+  //Char_str[16] is Speed Value
+  Char_str[17] = "Weight : ";
+  //Char_str[18] is Weight Value
+  Char_str[19] = "Timer  : ";
+  //Char_str[20] is time Value
+  Char_str[21] = "       SET UP";
+  Char_str[22] = "    ENCODER RUN.";
+  Char_str[23] = "";
+  Char_str[24] = "      ";
+  //Char_str[25] is Encoder Value
+  Char_str[26] = "";
+  Char_str[27] = "";
+  //================LCD================
+}
+
+void loop() {
+  //Operate_Wifi();
+  Operate_Char();
+  Operate_Keypad();
+  Operate_LCD();
+  Operate_Time();
+  if (Key_A >= 4) {
+    GOOGLE_ID();
+    Get_Meter();
+    Operate_Encoder();
+    Send_Data();
+  }
+}
+
+
+void Operate_Wifi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    digitalWrite(LED_BUILTIN, HIGH);
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_MODE_STA);
+    WiFi.enableSTA(true);
+    WiFi.begin(ssid, password);
+    if (wifi_count == 0) {
+      Serial.println("Connecting");
+    }
+    wifi_count++;
+    delay(1000);
+  } else {
+    if (wifi_count > 0) {
+      //WiFi.setSleep(true);
+      Serial.println("Connect to Success.");
+      digitalWrite(LED_BUILTIN, LOW);
+      wifi_count = 0;
+    }
+  }
+}
+
+void Operate_Time() {
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= 1000) {
+    if (Key_A <= 3) {
+      sec_cursor++;
+      if (sec_cursor > 2) {
+        sec_cursor = 1;
+      }
+    }
+    if (Key_A >= 4) {
+      if (sec <= 59) {
+        sec++;
+      }
+      if (sec >= 60) {
+        Process_Value = 1;
+      }
+      if (sec <= 9) {
+        sec_str = String("0") + String(sec) + String(" Sec ");
+      } else {
+        if (Process_Value > 0) {
+          sec_str = String("Waiting");
+        } else {
+          sec_str = String(sec) + String(" Sec ");
+        }
+      }
+    }
+    if (wifi_count >= 1) {
+      wifi_count++;
+    }
+    previousMillis = currentMillis;
+  }
+}
+
+void Operate_Char() {
+  Char_str[2] = OD;
+  Char_str[4] = TN;
+  Char_str[6] = MC;
+  Char_str[9] = String(OD + String("X") + TN);           //Char_str[9] is OD x Thickness
+  Char_str[11] = kWh_Str;                                //Char_str[11] is Power Value
+  Char_str[13] = String(Sent_Unit + String(" kWh/T"));   //Char_str[13] is Unit Value
+  Char_str[16] = String(Sent_Speed + String(" M/min"));  //Char_str[16] is Speed Value
+  Char_str[18] = String(Data_Weight + String(" T/hr"));  //Char_str[18] is Weight Value
+  Char_str[20] = sec_str;                                //Char_str[21] is time Value
+  Char_str[25] = String(Long_Encoder) + String(" M.");   //Char_str[26] is Encoder Value
+}
+
+void Operate_LCD() {
+  if (Key_A <= 3) {
+    //---------- Cursor--------------
+    if (Key_A <= 3 && Del == 1) {
+      lcd.setCursor(8 + Count_key, Key_A);
+      lcd.print(" ");
+      lcd.setCursor(7 + Count_key, Key_A);
+      lcd.print('\0');
+    }
+    if (Clear_cursor == 1) {
+      lcd.setCursor(7 + Set_cursor, Key_A - 1);
+      lcd.print(" ");
+      Clear_cursor = 0;
+    }
+    lcd.setCursor(7 + Count_key, Key_A);
+    if (sec_cursor == 1) {
+      lcd.print(" ");
+    } else {
+      lcd.write(byte(0));
+    }
+    //----------Fill out.------------
+  } else {
+  }
+
+  if (Lcd_clear == 1) {
+    lcd.clear();
+    Lcd_clear = 0;
+  }
+
+  lcd.setCursor(0, 0);
+  lcd.print(Char_str[Set_display]);
+  lcd.setCursor(0, 1);
+  lcd.print(Char_str[Set_display + 1]);
+  lcd.print(Char_str[Set_display + 2]);
+  lcd.setCursor(0, 2);
+  lcd.print(Char_str[Set_display + 3]);
+  lcd.print(Char_str[Set_display + 4]);
+  lcd.setCursor(0, 3);
+  lcd.print(Char_str[Set_display + 5]);
+  lcd.print(Char_str[Set_display + 6]);
+}
+
+
+void Operate_Encoder() {
+  if (Process_Value <= 0) {
+    Encoder_str = encoder.getCount() / 2;
+    if (Encoder_str.toFloat() != Encoder_float) {
+      Encoder_float = Encoder_str.toFloat();
+      Long_Encoder = (Encoder_float * 14.9935) / 1000;
+    }
+  }
+}
+
+
+void Get_Meter() {
+  if (Process_Value == 1 || Frist_Process == 0) {
+    for (char i = 0; i < Total_of_Reg; i++) {
+      DATA_METER[i] = Read_Meter(Meter_ADDR, Reg_addr[i]);
+    }
+    Data_Volt = (DATA_METER[0] / 100.0);
+    Data_kWh = (DATA_METER[1] / 1000.0) * 60;
+    Data_TotalEnergy = (DATA_METER[2] / 10.0) * 60;
+
+    if (Frist_Process == 1) {  //รอบที่สองเป็นต้นไป
+      if (Data_Volt > 0) {
+        kWh_Str = String(Data_kWh) + String(" kWh");
+        //kWh_Str = String(Data_Volt) + String(" Volt");  //Test
+        Process_Value = 2;
+      } else {
+        if (Count_Meter <= 5) {
+          Count_Meter = Count_Meter + 1;
+          delay(1000);
+        } else {
+          kWh_Str = String("Null");
+          Process_Value = 2;
+          Count_Meter = 0;
+        }
+      }
+    } else {  //รอบแรก
+      if (Data_Volt > 0) {
+        kWh_Str = String(Data_kWh) + String(" kWh");
+        //kWh_Str = String(Data_Volt) + String(" Volt");  //Test
+      } else {
+        kWh_Str = String("Null");
+      }
+      Frist_Process = 1;
+    }
+  }
+}
+
+void Send_Data() {
+  if (Process_Value == 2) {
+    Cal_Weight = (String(OD).toFloat() - String(TN).toFloat()) * (String(TN).toFloat() * 0.02491) * Long_Encoder;  //kg.
+    Data_Weight = (Cal_Weight / 1000) * 60;                                                                        // คูณ 60 เพื่อทำให้เป็นชั่วโมง, หาร 1000 แปลงจากkgเป็นตัน
+    Data_Unit = Data_kWh / Data_Weight;
+    if (String(MC).toFloat() < 10) {
+      Machine = String("AEI-0") + String(MC) + String("M");
+    } else {
+      Machine = String("AEI-") + String(MC) + String("M");
+    }
+
+    Sent_Machine = Machine;
+    Sent_Size = String(OD + String("X") + TN);
+    Sent_Unit = String(Data_Unit);
+    Sent_kWh = String(Data_kWh);
+    Sent_Speed = String(Long_Encoder);
+    Sent_Energy = String(Data_TotalEnergy);
+    String Send_Data = "name=" + Sent_Machine + "&size=" + Sent_Size + "&unit=" + Sent_Unit + "&kWh=" + Sent_kWh + "&speed=" + Sent_Speed + "&energy=" + Sent_Energy;
+    /*
+    if (WiFi.status() != WL_CONNECTED) {
+      digitalWrite(LED_BUILTIN, HIGH);
+      //WiFi.disconnect(true);
+      WiFi.mode(WIFI_MODE_STA);
+      WiFi.enableSTA(true);
+      WiFi.begin(ssid, password);
+      encoder.clearCount();
+      Process_Value = 0;
+      sec = 0;
+    }*/
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("WiFi Connected.");
+      Serial.println(Send_Data);
+      String urlFinal = "https://script.google.com/macros/s/" + GOOGLE_SCRIPT_ID + "/exec?" + Send_Data;
+      HTTPClient http;
+      http.begin(urlFinal.c_str());  //กำหนด url เพื่อเซฟข้อมูลลง google sheets
+      //http.begin(urlFinal);      
+      int httpCode = http.GET();            //ส่งค่า url
+      if (httpCode > 0) {                   //ถ้าส่งสำเร็จ
+        String payload = http.getString();  // อ่านค่าผลลัพธ์
+        Serial.println(payload);
+        Serial.print("CPU Freq: ");
+        Serial.println(getCpuFrequencyMhz());
+      }
+      http.end();  //ปิดการเชื่อมต่อ
+      //WiFi.disconnect(true);
+      encoder.clearCount();
+      Process_Value = 0;
+      sec = 0;
+      //wifi_count = 0;
+    } else {
+      encoder.clearCount();
+      Process_Value = 0;
+      sec = 0;
+      //wifi_count = 0;
+    }
+  }
+}
+
+
+void GOOGLE_ID() {
+  if (GoogleID_Report == 0) {
+    if (String(MC).toFloat() < 10) {
+      Machine = String("AEI-0") + String(MC) + String("M");
+    } else {
+      Machine = String("AEI-") + String(MC) + String("M");
+    }
+
+    if (Machine == "AEI-01M") {
+      GOOGLE_SCRIPT_ID = "AKfycby-_7of4e2OX-kY8WCLNlRNBzsFvcczFdYKFu-be0lB6KXLBpKik-2EAcmyNg-b1iIFdw";
+    }
+    if (Machine == "AEI-02M") {
+      GOOGLE_SCRIPT_ID = "AKfycbzNLyOWoiEcdVv82hgF_YWo_YPSdA9C7dXDhvdYvlCJ9GWABcosQo2OZeRlHukVgSKK";
+    }
+    if (Machine == "AEI-03M") {
+      GOOGLE_SCRIPT_ID = "AKfycbzcLdlVjssxQCeiaGDgyy87_tQpHhp3AFxg3qi29JOf1hPfy6igXS1bV-JGWjYEi37aMQ";
+    }
+    if (Machine == "AEI-04M") {
+      GOOGLE_SCRIPT_ID = "AKfycbyyQeYph4PQ1rFJ3oQvwUyBhfVKwmto9gVx5b7wxEMqfZRL21e-L9-wFpiPaC6oQvYo-w";
+    }
+    if (Machine == "AEI-05M") {
+      GOOGLE_SCRIPT_ID = "AKfycbz5vtMypVHA0S6g0xgU9VKLQcwsnWZ4lwLJNmNPFvAJ1CzYB6JCOSgEVw7HS7NEVMORww";
+    }
+    if (Machine == "AEI-06M") {
+      GOOGLE_SCRIPT_ID = "AKfycbwSHHJCjA8MewaGRf4lp2y_CNNNtv6fyfGUeI0h2Wc5iIrOHBRTA0VOS8cJ7EgdbYI4_A";
+    }
+    if (Machine == "AEI-07M") {
+      GOOGLE_SCRIPT_ID = "AKfycby5s95qRsBQU_SoQ8AZWU2FxL1Syp6A2KyBeBq1tqaPBZTGvHPppBIXgQWqRzdshBhF6w";
+    }
+    if (Machine == "AEI-08M") {
+      GOOGLE_SCRIPT_ID = "AKfycbwBbqFDOIxc76D3v1UVzCcYP5pKEcBpnjNkuojB537KZi2OqWe4z3JtBG_eS1gzVxPr_w";
+    }
+    if (Machine == "AEI-09M") {
+      GOOGLE_SCRIPT_ID = "AKfycbxaGPP_0nIdQZwgyPtxvtDPnqhY6AyVvSPk9nDuTYiXApNb8BpCbzsMjuX4rowk3aWpow";
+    }
+    if (Machine == "AEI-10M") {
+      GOOGLE_SCRIPT_ID = "AKfycbzFSctCTEajhhV7BMpVVe7OprD4urExe2Y9tqDh0tv3L-LG04CEI6Qw8O9SKbJ3eu1PYw";
+    }
+    if (Machine == "AEI-11M") {
+      GOOGLE_SCRIPT_ID = "AKfycbxeWkktTZPz-3HcIJIMJPKkq3esWPyLOCKDxeEzLtEURPgZYm5fqk2qxQV-3-FZ68HZ";
+    }
+    if (Machine == "AEI-12M") {
+      GOOGLE_SCRIPT_ID = "AKfycbzvUTvpf5vMze3SiLYRawjusT5q5OS5OAaRuIgztZP9b_KQcMSELDN4r8WliPynxp6x";
+    }
+    GoogleID_Report = 0;
+  }
+}
+
+void Operate_Keypad() {
+  char key = keypad.getKey();
+  if (key) {
+    Serial.println(key);
+    if (Count_key <= 10) {
+      if (key != 'A') {
+        if (key != 'B') {
+          if (key != 'C') {
+            if (key != 'D') {
+              if (key != '#') {
+                Del = 0;
+                if (Key_A == 1) {
+                  OD[Count_key] = key;
+                }
+                if (Key_A == 2) {
+                  TN[Count_key] = key;
+                }
+                if (Key_A == 3) {
+                  MC[Count_key] = key;
+                }
+                Count_key++;
+                Serial.println(String("Count key : ") + Count_key);
+              }
+            }
+          }
+        }
+      }
+    }
+    //------------------------------------------
+    if (key == 'A') {  //Enter
+      if (Key_A <= 4) {
+        Set_cursor = Count_key;
+        Clear_cursor = 1;
+        Key_A++;
+        Count_key = 0;
+      }
+      if (Key_A == 4) {
+        String Data_1 = String(OD);  //แปลงค่าความกว้างให้จาก Charเป็นString
+        String Data_2 = String(TN);  //แปลงค่าความหนาให้จาก Charเป็นString
+        String Data_3 = String('X');
+        Dimention_Value = Data_1 + Data_3 + Data_2;
+        Lcd_clear = 1;
+      }
+    }
+    //------------------------------------------
+    if (key == 'B') {  //Backspace
+      if (Count_key > 0) {
+        Count_key = Count_key - 1;
+        Del = 1;
+        Clear_cursor = 1;
+      }
+      if (Key_A == 1) {
+        OD[Count_key] = '\0';
+      }
+      if (Key_A == 2) {
+        TN[Count_key] = '\0';
+      }
+      if (Key_A == 3) {
+        MC[Count_key] = '\0';
+      }
+      Serial.println(String("Count key : ") + Count_key);
+    }
+    //------------------------------------------
+    if (key == 'C') {  //Re-start
+    }
+    //------------------------------------------
+    if (key == 'D') {  //Select
+      if (Key_A >= 4) {
+        Key_D++;
+        Lcd_clear = 1;
+        if (Key_D == 4) {
+          Key_D = 1;
+        }
+      }
+    }
+  }
+
+  if (Key_A <= 3) {
+    Set_display = 0;
+  } else {
+    if (Key_D == 1) {
+      Set_display = 7;
+    }
+    if (Key_D == 2) {
+      Set_display = 14;
+    }
+    if (Key_D == 3) {
+      Set_display = 21;
+    }
+  }
+}
